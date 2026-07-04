@@ -16,7 +16,6 @@ from twelvedata import TDClient
 # =========================
 TOKEN = os.environ["TELEGRAM_TOKEN"]
 API_KEY = os.environ["TWELVEDATA_API_KEY"]
-TELEGRAM_CHAT_ID = os.environ["CHAT_ID"]
 
 td = TDClient(apikey=API_KEY)
 
@@ -27,7 +26,8 @@ TICKERS = [
     "DIVO11","ISAE4","LAVV3","PETR4","POMO4","SAPR11",
     "SMAL11","SMTO3","VALE3",
     "VOO","SCHD","SPDW","QQQ","TLT","CIBR",
-    "BRK.B","JNJ","CVX","UBER","NKE","DLR"]
+    "BRK.B","JNJ","CVX","UBER","NKE","DLR"
+]
 
 # =========================
 # INDICADORES (SEM pandas_ta)
@@ -41,7 +41,8 @@ def rsi(series, period=14):
     gain = delta.where(delta > 0, 0).rolling(period).mean()
     loss = -delta.where(delta < 0, 0).rolling(period).mean()
 
-    rs = gain / loss
+    rs = gain / loss.replace(0, 1e-10)
+
     return 100 - (100 / (1 + rs))
 
 
@@ -53,7 +54,7 @@ def get_data(symbol):
         ts = td.time_series(
             symbol=symbol,
             interval="1day",
-            outputsize=100
+            outputsize=120
         )
 
         df = ts.as_pandas()
@@ -67,22 +68,24 @@ def get_data(symbol):
         return df
 
     except Exception as e:
-        print(e)
+        print(f"Erro ao buscar {symbol}: {e}")
         return None
 
 
 # =========================
-# SCORE
+# SCORE SYSTEM
 # =========================
 def score(last):
 
     s = 50
 
+    # RSI
     if last["RSI"] < 30:
         s += 20
     elif last["RSI"] > 70:
         s -= 20
 
+    # Tendência
     if last["close"] > last["SMA20"]:
         s += 10
 
@@ -103,7 +106,7 @@ def classify(s):
 
 
 # =========================
-# ANALYSIS CORE
+# SCANNER
 # =========================
 def run_scan():
 
@@ -121,6 +124,10 @@ def run_scan():
 
         last = df.iloc[-1]
 
+        # proteção contra NaN
+        if pd.isna(last["RSI"]):
+            continue
+
         sc = score(last)
 
         results.append({
@@ -136,25 +143,13 @@ def run_scan():
 
 
 # =========================
-# TELEGRAM SEND MESSAGE
-# =========================
-def send_message(text):
-
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-
-    requests.post(url, data={
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text
-    })
-
-
-# =========================
-# WEBHOOK TELEGRAM
+# TELEGRAM WEBHOOK
 # =========================
 @app.post("/webhook")
 async def telegram_webhook(req: Request):
 
     data = await req.json()
+    print("📩 UPDATE RECEBIDO:", data)
 
     message = data.get("message", {})
     text = message.get("text", "")
@@ -163,7 +158,9 @@ async def telegram_webhook(req: Request):
     if not text:
         return {"ok": True}
 
-    # /scan command
+    # =========================
+    # COMANDO /scan
+    # =========================
     if text == "/scan":
 
         df = run_scan()
@@ -175,10 +172,22 @@ async def telegram_webhook(req: Request):
 
         url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
 
-        requests.post(url, data={
+        r = requests.post(url, data={
             "chat_id": chat_id,
             "text": msg
         })
+
+        print("Telegram response:", r.text)
+
+    else:
+
+        requests.post(
+            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
+            data={
+                "chat_id": chat_id,
+                "text": "Comando inválido. Use /scan"
+            }
+        )
 
     return {"ok": True}
 
