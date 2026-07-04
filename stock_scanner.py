@@ -5,196 +5,197 @@ Created on Sat Jul  4 15:28:07 2026
 @author: wag08
 """
 
-import os
-import pandas as pd
-import requests
-from fastapi import FastAPI, Request
+import os, json 
+import pandas as pd 
+import streamlit as st
 from twelvedata import TDClient
 
-# =========================
-# ENV VARIABLES (Render)
-# =========================
-TOKEN = os.environ["TELEGRAM_TOKEN"]
-API_KEY = os.environ["TWELVEDATA_API_KEY"]
+API_KEY = 'd489129836fc49bd85c6e0234aadb14a' 
+td=TDClient(apikey=API_KEY)
 
-td = TDClient(apikey=API_KEY)
-
-app = FastAPI()
-
-TICKERS = [
-    "ABEV3","BBAS3","BBSE3","BOVA11","CMIG4","CMIN3",
-    "DIVO11","ISAE4","LAVV3","PETR4","POMO4","SAPR11",
-    "SMAL11","SMTO3","VALE3",
-    "VOO","SCHD","SPDW","QQQ","TLT","CIBR",
-    "BRK.B","JNJ","CVX","UBER","NKE","DLR"
+DEFAULT = [
+    "ABEV3", "BBAS3", "BBSE3", "BOVA11", "CMIG4", "CMIN3",
+    "DIVO11", "ISAE4", "LAVV3", "PETR4", "POMO4", "SAPR11",
+    "SMAL11", "SMTO3", "VALE3",
+    "VOO", "SCHD", "SPDW", "QQQ", "TLT", "CIBR",
+    "BRK.B", "JNJ", "CVX", "UBER", "NKE", "DLR"
 ]
+FILE='tickers.json'
 
-# =========================
-# INDICADORES (SEM pandas_ta)
-# =========================
-def sma(series, period):
-    return series.rolling(period).mean()
+def load():
+    if os.path.exists(FILE):
+        with open(FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
 
-def rsi(series, period=14):
-    delta = series.diff()
+    return DEFAULT
 
-    gain = delta.where(delta > 0, 0).rolling(period).mean()
-    loss = -delta.where(delta < 0, 0).rolling(period).mean()
+def save(lst): json.dump(lst,open(FILE,'w'),indent=2)
 
-    rs = gain / loss.replace(0, 1e-10)
+def sma(s,n): return s.rolling(n).mean()
 
-    return 100 - (100 / (1 + rs))
+def rsi(s, p=14):
+    d = s.diff()
+
+    g = d.clip(lower=0).rolling(p).mean()
+    l = (-d.clip(upper=0)).rolling(p).mean().replace(0, 1e-9)
+
+    rs = g / l
+
+    return 100 - 100 / (1 + rs)
 
 
-# =========================
-# DATA
-# =========================
-def get_data(symbol):
-    try:
-        ts = td.time_series(
-            symbol=symbol,
-            interval="1day",
-            outputsize=120
-        )
+def get(symbol):
 
-        df = ts.as_pandas()
+    ts = td.time_series(
+        symbol=symbol,
+        interval="1day",
+        outputsize=250
+    )
 
-        if df is None or df.empty:
-            return None
+    df = ts.as_pandas()
 
-        df = df.iloc[::-1]
-        df = df.astype(float)
-
-        return df
-
-    except Exception as e:
-        print(f"Erro ao buscar {symbol}: {e}")
+    if df is None or df.empty:
         return None
 
+    df = df.iloc[::-1].astype(float)
 
-# =========================
-# SCORE SYSTEM
-# =========================
-def score(last):
-
-    s = 50
-
-    # RSI
-    if last["RSI"] < 30:
-        s += 20
-    elif last["RSI"] > 70:
-        s -= 20
-
-    # Tendência
-    if last["close"] > last["SMA20"]:
-        s += 10
-
-    if last["close"] > last["SMA50"]:
-        s += 10
-
-    return max(0, min(100, s))
+    return df
 
 
-def classify(s):
-    if s >= 80:
-        return "🟢 FORTE COMPRA"
-    elif s >= 60:
-        return "🟡 NEUTRO"
-    elif s >= 40:
-        return "🟠 ATENÇÃO"
-    return "🔴 VENDA"
+def analyze(t):
 
+    try:
 
-# =========================
-# SCANNER
-# =========================
-def run_scan():
+        df = get(t)
 
-    results = []
-
-    for t in TICKERS:
-
-        df = get_data(t)
         if df is None:
-            continue
+            return None
 
-        df["SMA20"] = sma(df["close"], 20)
-        df["SMA50"] = sma(df["close"], 50)
-        df["RSI"] = rsi(df["close"], 14)
+        for n in [9, 21, 50, 200]:
+            df[f"SMA{n}"] = sma(df["close"], n)
 
-        last = df.iloc[-1]
+        df["RSI"] = rsi(df["close"])
+        df["VOL20"] = df["volume"].rolling(20).mean()
 
-        # proteção contra NaN
-        if pd.isna(last["RSI"]):
-            continue
+        x = df.iloc[-1]
 
-        sc = score(last)
+        score = 50
 
-        results.append({
-            "ticker": t,
-            "score": sc,
-            "signal": classify(sc)
-        })
+        if x["close"] > x["SMA21"]:
+            score += 10
 
-    df = pd.DataFrame(results)
-    df = df.sort_values("score", ascending=False)
+        if x["close"] > x["SMA50"]:
+            score += 10
 
-    return df.head(5)
+        if x["close"] > x["SMA200"]:
+            score += 15
 
+        if x["RSI"] < 30:
+            score += 15
 
-# =========================
-# TELEGRAM WEBHOOK
-# =========================
-@app.post("/webhook")
-async def telegram_webhook(req: Request):
+        elif 40 <= x["RSI"] <= 60:
+            score += 10
 
-    data = await req.json()
-    print("📩 UPDATE RECEBIDO:", data)
+        elif x["RSI"] > 70:
+            score -= 15
 
-    message = data.get("message", {})
-    text = message.get("text", "")
-    chat_id = message.get("chat", {}).get("id")
+        if x["volume"] > x["VOL20"]:
+            score += 10
 
-    if not text:
-        return {"ok": True}
+        score = max(0, min(100, score))
 
-    # =========================
-    # COMANDO /scan
-    # =========================
-    if text == "/scan":
+        if score >= 85:
+            signal = "🟢 Compra Forte"
+        elif score >= 70:
+            signal = "🟢 Compra"
+        elif score >= 55:
+            signal = "🟡 Neutro"
+        elif score >= 40:
+            signal = "🟠 Atenção"
+        else:
+            signal = "🔴 Venda"
 
-        df = run_scan()
+        return {
+            "Ticker": t,
+            "Preço": round(x["close"], 2),
+            "RSI": round(x["RSI"], 1),
+            "SMA9": round(x["SMA9"], 2),
+            "SMA21": round(x["SMA21"], 2),
+            "SMA50": round(x["SMA50"], 2),
+            "SMA200": round(x["SMA200"], 2),
+            "Volume": int(x["volume"]),
+            "Vol.Médio20": int(x["VOL20"]),
+            "Score": score,
+            "Sinal": signal
+        }
 
-        msg = "📊 TOP ATIVOS\n\n"
+    except Exception as e:
 
-        for _, row in df.iterrows():
-            msg += f"{row['ticker']} | {row['score']} | {row['signal']}\n"
-
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-
-        r = requests.post(url, data={
-            "chat_id": chat_id,
-            "text": msg
-        })
-
-        print("Telegram response:", r.text)
-
-    else:
-
-        requests.post(
-            f"https://api.telegram.org/bot{TOKEN}/sendMessage",
-            data={
-                "chat_id": chat_id,
-                "text": "Comando inválido. Use /scan"
-            }
-        )
-
-    return {"ok": True}
+        return {
+            "Ticker": t,
+            "Erro": str(e)
+        }
 
 
-# =========================
-# HEALTH CHECK (Render)
-# =========================
-@app.get("/")
-def home():
-    return {"status": "bot running"}
+st.set_page_config(layout="wide")
+
+st.title("Scanner de Ativos - Twelve Data")
+
+tickers = load()
+
+txt = st.sidebar.text_area(
+    "Tickers (1 por linha)",
+    "\n".join(tickers),
+    height=350
+)
+
+if st.sidebar.button("Salvar lista"):
+
+    tickers = [
+        i.strip().upper()
+        for i in txt.splitlines()
+        if i.strip()
+    ]
+
+    save(tickers)
+
+    st.sidebar.success("Lista salva")
+
+
+if st.button("Executar análise"):
+
+    tickers = [
+        i.strip().upper()
+        for i in txt.splitlines()
+        if i.strip()
+    ]
+
+    rows = []
+
+    bar = st.progress(0)
+
+    for i, t in enumerate(tickers):
+
+        r = analyze(t)
+
+        if r:
+            rows.append(r)
+
+        bar.progress((i + 1) / len(tickers))
+
+    df = pd.DataFrame(rows)
+
+    if "Score" in df.columns:
+        df = df.sort_values("Score", ascending=False)
+
+    st.dataframe(df, use_container_width=True)
+
+    if "Ticker" in df.columns and "Score" in df.columns:
+
+        sel = st.selectbox("Detalhes", df["Ticker"])
+
+        if sel:
+
+            st.write(
+                df[df["Ticker"] == sel].T
+            )
