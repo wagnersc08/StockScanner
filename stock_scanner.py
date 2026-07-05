@@ -6,11 +6,21 @@ Created on Sat Jul  4 15:28:07 2026
 """
 import os
 import json
+import numpy as np
 import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-st.set_page_config(layout="wide")
+st.set_page_config(
+    page_title="Scanner de Ativos",
+    layout="wide"
+)
+
+st.title("📈 Scanner de Ativos")
+
+# =====================================================
+# LISTA PADRÃO
+# =====================================================
 
 DEFAULT = [
     "ABEV3.SA",
@@ -44,351 +54,376 @@ DEFAULT = [
 
 FILE = "tickers.json"
 
+# =====================================================
+# TICKERS
+# =====================================================
 
 def load():
 
     if os.path.exists(FILE):
 
         with open(FILE, "r", encoding="utf-8") as f:
+
             return json.load(f)
 
     return DEFAULT
 
 
-def save(lst):
+def save(lista):
 
     with open(FILE, "w", encoding="utf-8") as f:
-        json.dump(lst, f, indent=4)
 
+        json.dump(
+            lista,
+            f,
+            indent=4,
+            ensure_ascii=False
+        )
 
-def sma(series, period):
+# =====================================================
+# MÉDIAS
+# =====================================================
 
-    return series.rolling(period).mean()
+def sma(series, periodo):
 
+    return series.rolling(periodo).mean()
 
-def rsi(series, period=14):
+# =====================================================
+# RSI
+# =====================================================
+
+def rsi(series, periodo=14):
 
     delta = series.diff()
 
-    gain = delta.where(delta > 0, 0).rolling(period).mean()
+    ganho = delta.clip(lower=0)
 
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
+    perda = -delta.clip(upper=0)
 
-    rs = gain / loss.replace(0, 1e-9)
+    ganho = ganho.rolling(periodo).mean()
 
-    return 100 - (100 / (1 + rs))
+    perda = perda.rolling(periodo).mean()
 
-@st.cache_data(ttl=3600)
+    rs = ganho / perda.replace(0, np.nan)
+
+    rsi = 100 - (100 / (1 + rs))
+
+    return rsi.fillna(50)
+
+# =====================================================
+# DOWNLOAD DOS DADOS
+# =====================================================
+
+@st.cache_data(ttl=900, show_spinner=False)
 def get(symbol):
 
     try:
 
         df = yf.download(
-            symbol,
+            tickers=symbol,
             period="1y",
             interval="1d",
+            auto_adjust=True,
             progress=False,
-            auto_adjust=True
+            threads=False
         )
 
         if df.empty:
             return None
 
-        df = df.rename(columns=str.lower)
+        # Corrige MultiIndex (algumas versões do yfinance retornam assim)
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+
+        # Colunas em minúsculas
+        df.columns = [c.lower() for c in df.columns]
+
+        # Mantém somente colunas necessárias
+        colunas = ["open", "high", "low", "close", "volume"]
+
+        for c in colunas:
+
+            if c not in df.columns:
+
+                df[c] = np.nan
+
+        df = df[colunas]
+
+        # Remove linhas sem preço
+        df = df.dropna(subset=["close"])
+
+        # Volume pode vir vazio em alguns ETFs
+        df["volume"] = (
+            df["volume"]
+            .fillna(0)
+            .astype(float)
+        )
 
         return df
 
     except Exception as e:
 
-        print(symbol, e)
+        print(f"Erro em {symbol}: {e}")
 
         return None
     
-def analyze(ticker):
+# =====================================================
+# INDICADORES
+# =====================================================
 
-    df = get(ticker)
+def add_indicators(df):
 
-    if df is None:
-        return None
+    df = df.copy()
 
-    # Médias móveis
     df["SMA9"] = sma(df["close"], 9)
+
     df["SMA21"] = sma(df["close"], 21)
+
     df["SMA50"] = sma(df["close"], 50)
+
     df["SMA200"] = sma(df["close"], 200)
 
-    # RSI
     df["RSI"] = rsi(df["close"])
 
-    # Volume médio
-    df["VOL20"] = df["volume"].rolling(20).mean()
+    df["VOL20"] = (
+        df["volume"]
+        .rolling(20)
+        .mean()
+    )
 
-    last = df.iloc[-1]
+    return df
 
-    score = 50
+# =====================================================
+# INTERFACE
+# =====================================================
 
-    motivos = []
-
-    # ---------- Tendência ----------
-
-    if last["close"] > last["SMA9"]:
-        score += 5
-        motivos.append("Acima da SMA9")
-
-    if last["close"] > last["SMA21"]:
-        score += 10
-        motivos.append("Acima da SMA21")
-
-    if last["close"] > last["SMA50"]:
-        score += 10
-        motivos.append("Acima da SMA50")
-
-    if last["close"] > last["SMA200"]:
-        score += 15
-        motivos.append("Acima da SMA200")
-
-    # ---------- Cruzamento ----------
-
-    if last["SMA21"] > last["SMA50"]:
-        score += 5
-        motivos.append("SMA21 > SMA50")
-
-    if last["SMA50"] > last["SMA200"]:
-        score += 10
-        motivos.append("SMA50 > SMA200")
-
-    # ---------- RSI ----------
-
-    if last["RSI"] < 30:
-        score += 15
-        motivos.append("RSI Sobrevendido")
-
-    elif 40 <= last["RSI"] <= 60:
-        score += 10
-        motivos.append("RSI Saudável")
-
-    elif last["RSI"] > 70:
-        score -= 15
-        motivos.append("RSI Sobrecomprado")
-
-    # ---------- Volume ----------
-
-    if last["volume"] > last["VOL20"]:
-        score += 10
-        motivos.append("Volume acima da média")
-
-    score = max(0, min(100, score))
-
-    # ---------- Classificação ----------
-
-    if score >= 85:
-        sinal = "🟢 Compra Forte"
-
-    elif score >= 70:
-        sinal = "🟢 Compra"
-
-    elif score >= 55:
-        sinal = "🟡 Neutro"
-
-    elif score >= 40:
-        sinal = "🟠 Atenção"
-
-    else:
-        sinal = "🔴 Venda"
-
-    return {
-
-        "Ticker": ticker,
-
-        "Preço": round(last["close"], 2),
-
-        "RSI": round(last["RSI"], 1),
-
-        "SMA9": round(last["SMA9"], 2),
-
-        "SMA21": round(last["SMA21"], 2),
-
-        "SMA50": round(last["SMA50"], 2),
-
-        "SMA200": round(last["SMA200"], 2),
-
-        "Volume": int(last["volume"]),
-
-        "Vol. Médio": int(last["VOL20"]),
-
-        "Score": score,
-
-        "Sinal": sinal,
-
-        "Motivos": ", ".join(motivos)
-    }
-
-# ======================================================
-# INTERFACE STREAMLIT
-# ======================================================
-
-st.title("📈 Scanner de Ativos")
-
-st.write(
-    "Análise baseada em Médias Móveis, RSI e Volume utilizando Yahoo Finance."
-)
+st.sidebar.title("⚙️ Configurações")
 
 tickers = load()
 
 txt = st.sidebar.text_area(
-    "Tickers (1 por linha)",
+    "Tickers (um por linha)",
     "\n".join(tickers),
-    height=400
+    height=420
 )
 
 col1, col2 = st.sidebar.columns(2)
 
 with col1:
 
-    if st.button("Executar análise"):
+    if st.button("💾 Salvar"):
 
-        tickers = [
-            t.strip().upper()
-            for t in txt.splitlines()
-            if t.strip()
+        nova_lista = [
+            i.strip().upper()
+            for i in txt.splitlines()
+            if i.strip()
         ]
 
-        resultados = []
+        save(nova_lista)
 
-        progresso = st.progress(0)
+        st.success("Lista salva!")
 
-        status = st.empty()
+with col2:
+
+    executar = st.button("▶ Executar")
+
+
+# =====================================================
+# EXECUÇÃO
+# =====================================================
+
+if executar:
+
+    tickers = [
+        i.strip().upper()
+        for i in txt.splitlines()
+        if i.strip()
+    ]
+
+    resultados = []
+
+    progresso = st.progress(0)
+
+    status = st.empty()
+
+    with st.spinner("Consultando Yahoo Finance..."):
+
+        total = len(tickers)
 
         for i, ticker in enumerate(tickers):
 
-            status.write(f"Analisando {ticker}...")
+            status.write(f"Baixando {ticker}...")
+
+            df = get(ticker)
+
+            if df is None:
+
+                progresso.progress((i + 1) / total)
+
+                continue
+
+            df = add_indicators(df)
 
             resultado = analyze(ticker)
 
             if resultado is not None:
+
                 resultados.append(resultado)
 
-            progresso.progress((i + 1) / len(tickers))
+            progresso.progress((i + 1) / total)
 
-        status.success("Análise concluída!")
+    status.success("Concluído!")
 
-        df = pd.DataFrame(resultados)
+    if len(resultados) == 0:
 
-        if len(df) > 0:
+        st.error("Nenhum ativo retornou dados.")
 
-            df = df.sort_values(
-                by="Score",
-                ascending=False
-            )
+        st.stop()
 
-            st.subheader("Resultado")
+    resultado = pd.DataFrame(resultados)
 
-            st.dataframe(
-                df,
-                use_container_width=True,
-                hide_index=True
-            )
+    resultado = resultado.sort_values(
+        "Score",
+        ascending=False
+    ).reset_index(drop=True)
 
-            st.subheader("Detalhes")
+    # =====================================================
+    # MÉTRICAS
+    # =====================================================
 
-            ativo = st.selectbox(
-                "Selecione um ativo",
-                df["Ticker"]
-            )
+    c1, c2, c3, c4 = st.columns(4)
 
-            detalhe = df[df["Ticker"] == ativo]
+    c1.metric(
+        "Ativos",
+        len(resultado)
+    )
 
-            c1, c2 = st.columns(2)
+    c2.metric(
+        "Compra Forte",
+        (resultado["Score"] >= 85).sum()
+    )
 
-            with c1:
+    c3.metric(
+        "Compra",
+        (
+            (resultado["Score"] >= 70) &
+            (resultado["Score"] < 85)
+        ).sum()
+    )
 
-                st.metric(
-                    "Preço",
-                    detalhe["Preço"].values[0]
-                )
+    c4.metric(
+        "Venda",
+        (resultado["Score"] < 40).sum()
+    )
 
-                st.metric(
-                    "RSI",
-                    detalhe["RSI"].values[0]
-                )
+    st.divider()
 
-                st.metric(
-                    "Score",
-                    detalhe["Score"].values[0]
-                )
+    # =====================================================
+    # FILTRO
+    # =====================================================
 
-                st.metric(
-                    "Sinal",
-                    detalhe["Sinal"].values[0]
-                )
+    score_min = st.slider(
+        "Score mínimo",
+        0,
+        100,
+        0
+    )
 
-            with c2:
+    resultado = resultado[
+        resultado["Score"] >= score_min
+    ]
 
-                st.metric(
-                    "SMA9",
-                    detalhe["SMA9"].values[0]
-                )
+    # =====================================================
+    # TABELA
+    # =====================================================
 
-                st.metric(
-                    "SMA21",
-                    detalhe["SMA21"].values[0]
-                )
+    st.subheader("Resultado")
 
-                st.metric(
-                    "SMA50",
-                    detalhe["SMA50"].values[0]
-                )
+    st.dataframe(
+        resultado,
+        use_container_width=True,
+        hide_index=True
+    )
 
-                st.metric(
-                    "SMA200",
-                    detalhe["SMA200"].values[0]
-                )
+    st.divider()
 
-            st.subheader("Justificativa")
+    # =====================================================
+    # DETALHES
+    # =====================================================
 
-            st.info(
-                detalhe["Motivos"].values[0]
-            )
+    ativo = st.selectbox(
+        "Selecionar ativo",
+        resultado["Ticker"]
+    )
 
-            st.subheader("Histórico")
+    detalhe = resultado[
+        resultado["Ticker"] == ativo
+    ].iloc[0]
 
-            hist = get(ativo)
+    c1, c2, c3 = st.columns(3)
 
-            if hist is not None:
+    c1.metric(
+        "Preço",
+        detalhe["Preço"]
+    )
 
-                graf = hist[["close"]].copy()
+    c2.metric(
+        "RSI",
+        detalhe["RSI"]
+    )
 
-                graf["SMA21"] = sma(
-                    graf["close"],
-                    21
-                )
+    c3.metric(
+        "Score",
+        detalhe["Score"]
+    )
 
-                graf["SMA50"] = sma(
-                    graf["close"],
-                    50
-                )
+    c1.metric(
+        "SMA9",
+        detalhe["SMA9"]
+    )
 
-                graf["SMA200"] = sma(
-                    graf["close"],
-                    200
-                )
+    c2.metric(
+        "SMA21",
+        detalhe["SMA21"]
+    )
 
-                st.line_chart(graf)
+    c3.metric(
+        "SMA50",
+        detalhe["SMA50"]
+    )
 
-        else:
+    st.metric(
+        "SMA200",
+        detalhe["SMA200"]
+    )
 
-            st.error("Nenhum ativo retornou dados.")
+    st.success(
+        detalhe["Sinal"]
+    )
 
-with col2:
+    st.info(
+        detalhe["Motivos"]
+    )
 
-    if st.button("Salvar lista"):
+    # =====================================================
+    # GRÁFICO
+    # =====================================================
 
-        lista = [
-            t.strip().upper()
-            for t in txt.splitlines()
-            if t.strip()
+    hist = get(ativo)
+
+    if hist is not None:
+
+        hist = add_indicators(hist)
+
+        graf = hist[
+            [
+                "close",
+                "SMA21",
+                "SMA50",
+                "SMA200"
+            ]
         ]
 
-        save(lista)
+        st.subheader("Histórico")
 
-        st.success("Lista salva com sucesso!")
+        st.line_chart(graf)
