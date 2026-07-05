@@ -4,6 +4,11 @@ Created on Sat Jul  4 15:28:07 2026
 
 @author: wag08
 """
+"""
+Created on Sat Jul  4 15:28:07 2026
+
+@author: wag08
+"""
 import os
 import json
 import numpy as np
@@ -111,28 +116,29 @@ def get(symbol):
 # (pontos, motivo) ou None se não houver dado suficiente para avaliar.
 #
 # Ordem de prioridade (do peso maior pro menor):
-#   1) Divergência de RSI     -> ±40
-#   2) RSI simples             -> ±30
-#   3) Desconto vs. SMA200     -> ±20
-#   4) Variações de médias     -> ±5 (curto e longo prazo)
+#   1) Divergência de RSI       -> ±30
+#   1) RSI simples              -> ±30
+#   2) Desconto vs. SMA200      -> ±20
+#   3) SMA9 > SMA21             -> +5 (só a favor)
+#   3) SMA50 > SMA200           -> +5 (só a favor)
 # =====================================================
 
 def regra_sma_curto(df):
     ultimo = df.iloc[-1]
     if pd.isna(ultimo.SMA9) or pd.isna(ultimo.SMA21):
         return None
-    if ultimo.SMA9 < ultimo.SMA21:
-        return 5, "SMA9 < SMA21 (leve desconto de curto prazo)"
-    return -5, "SMA9 > SMA21 (sem desconto de curto prazo)"
+    if ultimo.SMA9 > ultimo.SMA21:
+        return 5, "SMA9 > SMA21 (curto prazo positivo)"
+    return None
 
 
 def regra_sma_longo(df):
     ultimo = df.iloc[-1]
     if pd.isna(ultimo.SMA50) or pd.isna(ultimo.SMA200):
         return None
-    if ultimo.SMA50 < ultimo.SMA200:
-        return 5, "SMA50 < SMA200 (papel fora de favor, possível barganha)"
-    return -5, "SMA50 > SMA200 (sem desconto de médio prazo)"
+    if ultimo.SMA50 > ultimo.SMA200:
+        return 5, "SMA50 > SMA200 (tendência de fundo positiva)"
+    return None
 
 
 def regra_preco_sma200(df):
@@ -192,12 +198,12 @@ def regra_divergencia_rsi(df, ordem=5, lookback=90):
     if len(minimos) >= 2:
         i1, i2 = minimos[-2], minimos[-1]
         if precos[i2] < precos[i1] and rsis[i2] > rsis[i1]:
-            return 40, "Divergência de alta no RSI (preço caiu, RSI subiu)"
+            return 30, "Divergência de alta no RSI (preço caiu, RSI subiu)"
 
     if len(maximos) >= 2:
         i1, i2 = maximos[-2], maximos[-1]
         if precos[i2] > precos[i1] and rsis[i2] < rsis[i1]:
-            return -40, "Divergência de baixa no RSI (preço subiu, RSI caiu)"
+            return -30, "Divergência de baixa no RSI (preço subiu, RSI caiu)"
 
     return None
 
