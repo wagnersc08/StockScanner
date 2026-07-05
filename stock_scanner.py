@@ -20,9 +20,9 @@ st.title("📈 Scanner de Ativos")
 
 DEFAULT = [
     "ABEV3.SA", "BBAS3.SA", "BBSE3.SA", "BOVA11.SA", "CMIG4.SA",
-    "CMIN3.SA", "DIVO11.SA", "ISAE4.SA", "LAVV3.SA", "PETR4.SA",
+    "CMIN3.SA", "DIVO11.SA", "ISAE4.SA", "ITUB4", "ITSA4","LAVV3.SA", "PETR4.SA",
     "POMO4.SA", "SAPR11.SA", "SMAL11.SA", "SMTO3.SA", "VALE3.SA",
-    "VOO", "SCHD", "SPDW", "QQQ", "TLT", "CIBR", "BRK-B",
+    "WEGE3","VOO", "SCHD", "SPDW", "QQQ", "TLT", "CIBR", "BRK-B",
     "JNJ", "CVX", "UBER", "NKE", "DLR"
 ]
 
@@ -109,41 +109,92 @@ def get(symbol):
 # ou None se não houver dado suficiente para avaliar.
 # =====================================================
 
-def regra_sma_curto(row):
-    if pd.isna(row.SMA9) or pd.isna(row.SMA21):
+def regra_sma_curto(df):
+    ultimo = df.iloc[-1]
+    if pd.isna(ultimo.SMA9) or pd.isna(ultimo.SMA21):
         return None
-    if row.SMA9 > row.SMA21:
+    if ultimo.SMA9 > ultimo.SMA21:
         return 10, "SMA9 > SMA21 (curto prazo positivo)"
     return -10, "SMA9 < SMA21 (curto prazo negativo)"
 
 
-def regra_sma_longo(row):
-    if pd.isna(row.SMA50) or pd.isna(row.SMA200):
+def regra_sma_longo(df):
+    ultimo = df.iloc[-1]
+    if pd.isna(ultimo.SMA50) or pd.isna(ultimo.SMA200):
         return None
-    if row.SMA50 > row.SMA200:
+    if ultimo.SMA50 > ultimo.SMA200:
         return 15, "SMA50 > SMA200 (tendência de fundo positiva)"
     return -15, "SMA50 < SMA200 (tendência de fundo negativa)"
 
 
-def regra_preco_sma200(row):
-    if pd.isna(row.close) or pd.isna(row.SMA200):
+def regra_preco_sma200(df):
+    ultimo = df.iloc[-1]
+    if pd.isna(ultimo.close) or pd.isna(ultimo.SMA200):
         return None
-    if row.close > row.SMA200:
-        return 10, "Preço acima da SMA200"
-    return -10, "Preço abaixo da SMA200"
+    if ultimo.close > ultimo.SMA200:
+        return 20, "Preço acima da SMA200"
+    return -20, "Preço abaixo da SMA200"
 
 
-def regra_rsi(row):
-    if pd.isna(row.RSI):
+def regra_rsi(df):
+    ultimo = df.iloc[-1]
+    if pd.isna(ultimo.RSI):
         return None
-    if row.RSI < 30:
-        return 15, "RSI em sobrevenda (<30)"
-    if row.RSI > 70:
-        return -15, "RSI em sobrecompra (>70)"
+    if ultimo.RSI < 30:
+        return 30, "RSI em sobrevenda (<30)"
+    if ultimo.RSI > 70:
+        return -30, "RSI em sobrecompra (>70)"
     return None
 
 
-REGRAS = [regra_sma_curto, regra_sma_longo, regra_preco_sma200, regra_rsi]
+def encontrar_pivos(series, ordem=5):
+    """
+    Identifica fundos e topos locais: um ponto é pivô quando é o menor (ou
+    maior) valor dentro de uma janela de 'ordem' dias para cada lado dele.
+    """
+    minimos, maximos = [], []
+    n = len(series)
+
+    for i in range(ordem, n - ordem):
+        janela = series.iloc[i - ordem: i + ordem + 1]
+        if series.iloc[i] == janela.min():
+            minimos.append(i)
+        if series.iloc[i] == janela.max():
+            maximos.append(i)
+
+    return minimos, maximos
+
+
+def regra_divergencia_rsi(df, ordem=5, lookback=90):
+    """
+    Compara os dois últimos pivôs de preço (dentro da janela de 'lookback'
+    dias) com o RSI no mesmo ponto:
+
+    - Divergência de alta: preço faz fundo mais baixo, RSI faz fundo mais
+      alto -> pressão vendedora enfraquecendo, possível reversão para cima.
+    - Divergência de baixa: preço faz topo mais alto, RSI faz topo mais
+      baixo -> força compradora enfraquecendo, possível reversão para baixo.
+    """
+    dados = df.iloc[-lookback:] if len(df) > lookback else df
+    precos = dados["close"].reset_index(drop=True)
+    rsis = dados["RSI"].reset_index(drop=True)
+
+    minimos, maximos = encontrar_pivos(precos, ordem)
+
+    if len(minimos) >= 2:
+        i1, i2 = minimos[-2], minimos[-1]
+        if precos[i2] < precos[i1] and rsis[i2] > rsis[i1]:
+            return 30, "Divergência de alta no RSI (preço caiu, RSI subiu)"
+
+    if len(maximos) >= 2:
+        i1, i2 = maximos[-2], maximos[-1]
+        if precos[i2] > precos[i1] and rsis[i2] < rsis[i1]:
+            return -30, "Divergência de baixa no RSI (preço subiu, RSI caiu)"
+
+    return None
+
+
+REGRAS = [regra_sma_curto, regra_sma_longo, regra_preco_sma200, regra_rsi, regra_divergencia_rsi]
 
 
 def classificar(score):
@@ -165,7 +216,7 @@ def analyze(ticker, df):
     motivos = []
 
     for regra in REGRAS:
-        resultado = regra(ultimo)
+        resultado = regra(df)
         if resultado:
             pontos, motivo = resultado
             score += pontos
