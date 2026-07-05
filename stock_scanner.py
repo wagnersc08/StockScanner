@@ -11,11 +11,7 @@ import pandas as pd
 import streamlit as st
 import yfinance as yf
 
-st.set_page_config(
-    page_title="Scanner de Ativos",
-    layout="wide"
-)
-
+st.set_page_config(page_title="Scanner de Ativos", layout="wide")
 st.title("📈 Scanner de Ativos")
 
 # =====================================================
@@ -23,33 +19,11 @@ st.title("📈 Scanner de Ativos")
 # =====================================================
 
 DEFAULT = [
-    "ABEV3.SA",
-    "BBAS3.SA",
-    "BBSE3.SA",
-    "BOVA11.SA",
-    "CMIG4.SA",
-    "CMIN3.SA",
-    "DIVO11.SA",
-    "ISAE4.SA",
-    "LAVV3.SA",
-    "PETR4.SA",
-    "POMO4.SA",
-    "SAPR11.SA",
-    "SMAL11.SA",
-    "SMTO3.SA",
-    "VALE3.SA",
-    "VOO",
-    "SCHD",
-    "SPDW",
-    "QQQ",
-    "TLT",
-    "CIBR",
-    "BRK-B",
-    "JNJ",
-    "CVX",
-    "UBER",
-    "NKE",
-    "DLR"
+    "ABEV3.SA", "BBAS3.SA", "BBSE3.SA", "BOVA11.SA", "CMIG4.SA",
+    "CMIN3.SA", "DIVO11.SA", "ISAE4.SA", "LAVV3.SA", "PETR4.SA",
+    "POMO4.SA", "SAPR11.SA", "SMAL11.SA", "SMTO3.SA", "VALE3.SA",
+    "VOO", "SCHD", "SPDW", "QQQ", "TLT", "CIBR", "BRK-B",
+    "JNJ", "CVX", "UBER", "NKE", "DLR"
 ]
 
 FILE = "tickers.json"
@@ -59,56 +33,41 @@ FILE = "tickers.json"
 # =====================================================
 
 def load():
-
     if os.path.exists(FILE):
-
         with open(FILE, "r", encoding="utf-8") as f:
-
             return json.load(f)
-
     return DEFAULT
 
 
 def save(lista):
-
     with open(FILE, "w", encoding="utf-8") as f:
-
-        json.dump(
-            lista,
-            f,
-            indent=4,
-            ensure_ascii=False
-        )
+        json.dump(lista, f, indent=4, ensure_ascii=False)
 
 # =====================================================
-# MÉDIAS
+# INDICADORES
 # =====================================================
 
 def sma(series, periodo):
-
     return series.rolling(periodo).mean()
 
-# =====================================================
-# RSI
-# =====================================================
 
 def rsi(series, periodo=14):
-
     delta = series.diff()
-
-    ganho = delta.clip(lower=0)
-
-    perda = -delta.clip(upper=0)
-
-    ganho = ganho.rolling(periodo).mean()
-
-    perda = perda.rolling(periodo).mean()
-
+    ganho = delta.clip(lower=0).rolling(periodo).mean()
+    perda = (-delta.clip(upper=0)).rolling(periodo).mean()
     rs = ganho / perda.replace(0, np.nan)
+    return (100 - (100 / (1 + rs))).fillna(50)
 
-    rsi = 100 - (100 / (1 + rs))
 
-    return rsi.fillna(50)
+def add_indicators(df):
+    df = df.copy()
+    df["SMA9"] = sma(df["close"], 9)
+    df["SMA21"] = sma(df["close"], 21)
+    df["SMA50"] = sma(df["close"], 50)
+    df["SMA200"] = sma(df["close"], 200)
+    df["RSI"] = rsi(df["close"])
+    df["VOL20"] = df["volume"].rolling(20).mean()
+    return df
 
 # =====================================================
 # DOWNLOAD DOS DADOS
@@ -116,314 +75,228 @@ def rsi(series, periodo=14):
 
 @st.cache_data(ttl=900, show_spinner=False)
 def get(symbol):
-
     try:
-
         df = yf.download(
-            tickers=symbol,
-            period="1y",
-            interval="1d",
-            auto_adjust=True,
-            progress=False,
-            threads=False
+            tickers=symbol, period="1y", interval="1d",
+            auto_adjust=True, progress=False, threads=False
         )
 
         if df.empty:
             return None
 
-        # Corrige MultiIndex (algumas versões do yfinance retornam assim)
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
 
-        # Colunas em minúsculas
         df.columns = [c.lower() for c in df.columns]
 
-        # Mantém somente colunas necessárias
         colunas = ["open", "high", "low", "close", "volume"]
-
         for c in colunas:
-
             if c not in df.columns:
-
                 df[c] = np.nan
 
-        df = df[colunas]
-
-        # Remove linhas sem preço
-        df = df.dropna(subset=["close"])
-
-        # Volume pode vir vazio em alguns ETFs
-        df["volume"] = (
-            df["volume"]
-            .fillna(0)
-            .astype(float)
-        )
+        df = df[colunas].dropna(subset=["close"])
+        df["volume"] = df["volume"].fillna(0).astype(float)
 
         return df
 
     except Exception as e:
-
         print(f"Erro em {symbol}: {e}")
-
         return None
-    
-# =====================================================
-# INDICADORES
-# =====================================================
-
-def add_indicators(df):
-
-    df = df.copy()
-
-    df["SMA9"] = sma(df["close"], 9)
-
-    df["SMA21"] = sma(df["close"], 21)
-
-    df["SMA50"] = sma(df["close"], 50)
-
-    df["SMA200"] = sma(df["close"], 200)
-
-    df["RSI"] = rsi(df["close"])
-
-    df["VOL20"] = (
-        df["volume"]
-        .rolling(20)
-        .mean()
-    )
-
-    return df
 
 # =====================================================
-# INTERFACE
+# REGRAS DE SCORE
+# Cada regra recebe a última linha do df e devolve (pontos, motivo)
+# ou None se não houver dado suficiente para avaliar.
+# =====================================================
+
+def regra_sma_curto(row):
+    if pd.isna(row.SMA9) or pd.isna(row.SMA21):
+        return None
+    if row.SMA9 > row.SMA21:
+        return 10, "SMA9 > SMA21 (curto prazo positivo)"
+    return -10, "SMA9 < SMA21 (curto prazo negativo)"
+
+
+def regra_sma_longo(row):
+    if pd.isna(row.SMA50) or pd.isna(row.SMA200):
+        return None
+    if row.SMA50 > row.SMA200:
+        return 15, "SMA50 > SMA200 (tendência de fundo positiva)"
+    return -15, "SMA50 < SMA200 (tendência de fundo negativa)"
+
+
+def regra_preco_sma200(row):
+    if pd.isna(row.close) or pd.isna(row.SMA200):
+        return None
+    if row.close > row.SMA200:
+        return 10, "Preço acima da SMA200"
+    return -10, "Preço abaixo da SMA200"
+
+
+def regra_rsi(row):
+    if pd.isna(row.RSI):
+        return None
+    if row.RSI < 30:
+        return 15, "RSI em sobrevenda (<30)"
+    if row.RSI > 70:
+        return -15, "RSI em sobrecompra (>70)"
+    return None
+
+
+REGRAS = [regra_sma_curto, regra_sma_longo, regra_preco_sma200, regra_rsi]
+
+
+def classificar(score):
+    if score >= 85:
+        return "🟢 Compra Forte"
+    if score >= 70:
+        return "🟢 Compra"
+    if score >= 40:
+        return "🟡 Neutro"
+    return "🔴 Venda"
+
+
+def analyze(ticker, df):
+    if df is None or df.empty:
+        return None
+
+    ultimo = df.iloc[-1]
+    score = 50
+    motivos = []
+
+    for regra in REGRAS:
+        resultado = regra(ultimo)
+        if resultado:
+            pontos, motivo = resultado
+            score += pontos
+            motivos.append(motivo)
+
+    score = int(max(0, min(100, score)))
+    r = lambda v: round(float(v), 2) if pd.notna(v) else None
+
+    return {
+        "Ticker": ticker,
+        "Preço": r(ultimo.close),
+        "RSI": r(ultimo.RSI),
+        "SMA9": r(ultimo.SMA9),
+        "SMA21": r(ultimo.SMA21),
+        "SMA50": r(ultimo.SMA50),
+        "SMA200": r(ultimo.SMA200),
+        "Score": score,
+        "Sinal": classificar(score),
+        "Motivos": "; ".join(motivos) if motivos else "Sem sinais relevantes"
+    }
+
+# =====================================================
+# INTERFACE - SIDEBAR
 # =====================================================
 
 st.sidebar.title("⚙️ Configurações")
 
 tickers = load()
-
-txt = st.sidebar.text_area(
-    "Tickers (um por linha)",
-    "\n".join(tickers),
-    height=420
-)
+txt = st.sidebar.text_area("Tickers (um por linha)", "\n".join(tickers), height=420)
 
 col1, col2 = st.sidebar.columns(2)
-
 with col1:
-
     if st.button("💾 Salvar"):
-
-        nova_lista = [
-            i.strip().upper()
-            for i in txt.splitlines()
-            if i.strip()
-        ]
-
-        save(nova_lista)
-
+        save([i.strip().upper() for i in txt.splitlines() if i.strip()])
         st.success("Lista salva!")
-
 with col2:
-
     executar = st.button("▶ Executar")
-
 
 # =====================================================
 # EXECUÇÃO
 # =====================================================
 
 if executar:
-
-    tickers = [
-        i.strip().upper()
-        for i in txt.splitlines()
-        if i.strip()
-    ]
+    tickers = [i.strip().upper() for i in txt.splitlines() if i.strip()]
 
     resultados = []
+    dados = {}  # guarda os df já processados, evita baixar/recalcular de novo no gráfico
 
     progresso = st.progress(0)
-
     status = st.empty()
 
     with st.spinner("Consultando Yahoo Finance..."):
-
         total = len(tickers)
 
         for i, ticker in enumerate(tickers):
-
             status.write(f"Baixando {ticker}...")
 
             df = get(ticker)
 
-            if df is None:
+            if df is not None:
+                df = add_indicators(df)
+                dados[ticker] = df
 
-                progresso.progress((i + 1) / total)
-
-                continue
-
-            df = add_indicators(df)
-
-            resultado = analyze(ticker)
-
-            if resultado is not None:
-
-                resultados.append(resultado)
+                resultado = analyze(ticker, df)
+                if resultado is not None:
+                    resultados.append(resultado)
 
             progresso.progress((i + 1) / total)
 
     status.success("Concluído!")
 
-    if len(resultados) == 0:
-
+    if not resultados:
         st.error("Nenhum ativo retornou dados.")
-
         st.stop()
 
-    resultado = pd.DataFrame(resultados)
-
-    resultado = resultado.sort_values(
-        "Score",
-        ascending=False
-    ).reset_index(drop=True)
+    resultado = pd.DataFrame(resultados).sort_values("Score", ascending=False).reset_index(drop=True)
 
     # =====================================================
-    # MÉTRICAS
+    # MÉTRICAS GERAIS
     # =====================================================
 
-    c1, c2, c3, c4 = st.columns(4)
-
-    c1.metric(
-        "Ativos",
-        len(resultado)
-    )
-
-    c2.metric(
-        "Compra Forte",
-        (resultado["Score"] >= 85).sum()
-    )
-
-    c3.metric(
-        "Compra",
-        (
-            (resultado["Score"] >= 70) &
-            (resultado["Score"] < 85)
-        ).sum()
-    )
-
-    c4.metric(
-        "Venda",
-        (resultado["Score"] < 40).sum()
-    )
-
-    st.divider()
-
-    # =====================================================
-    # FILTRO
-    # =====================================================
-
-    score_min = st.slider(
-        "Score mínimo",
-        0,
-        100,
-        0
-    )
-
-    resultado = resultado[
-        resultado["Score"] >= score_min
+    metricas_gerais = [
+        ("Ativos", len(resultado)),
+        ("Compra Forte", (resultado["Score"] >= 85).sum()),
+        ("Compra", ((resultado["Score"] >= 70) & (resultado["Score"] < 85)).sum()),
+        ("Venda", (resultado["Score"] < 40).sum()),
     ]
 
-    # =====================================================
-    # TABELA
-    # =====================================================
-
-    st.subheader("Resultado")
-
-    st.dataframe(
-        resultado,
-        use_container_width=True,
-        hide_index=True
-    )
+    for col, (label, valor) in zip(st.columns(4), metricas_gerais):
+        col.metric(label, valor)
 
     st.divider()
 
     # =====================================================
-    # DETALHES
+    # FILTRO E TABELA
     # =====================================================
 
-    ativo = st.selectbox(
-        "Selecionar ativo",
-        resultado["Ticker"]
-    )
+    score_min = st.slider("Score mínimo", 0, 100, 0)
+    resultado = resultado[resultado["Score"] >= score_min]
 
-    detalhe = resultado[
-        resultado["Ticker"] == ativo
-    ].iloc[0]
+    st.subheader("Resultado")
+    st.dataframe(resultado, use_container_width=True, hide_index=True)
 
-    c1, c2, c3 = st.columns(3)
-
-    c1.metric(
-        "Preço",
-        detalhe["Preço"]
-    )
-
-    c2.metric(
-        "RSI",
-        detalhe["RSI"]
-    )
-
-    c3.metric(
-        "Score",
-        detalhe["Score"]
-    )
-
-    c1.metric(
-        "SMA9",
-        detalhe["SMA9"]
-    )
-
-    c2.metric(
-        "SMA21",
-        detalhe["SMA21"]
-    )
-
-    c3.metric(
-        "SMA50",
-        detalhe["SMA50"]
-    )
-
-    st.metric(
-        "SMA200",
-        detalhe["SMA200"]
-    )
-
-    st.success(
-        detalhe["Sinal"]
-    )
-
-    st.info(
-        detalhe["Motivos"]
-    )
+    st.divider()
 
     # =====================================================
-    # GRÁFICO
+    # DETALHES DO ATIVO
     # =====================================================
 
-    hist = get(ativo)
+    ativo = st.selectbox("Selecionar ativo", resultado["Ticker"])
+    detalhe = resultado[resultado["Ticker"] == ativo].iloc[0]
+
+    metricas_detalhe = [
+        ("Preço", detalhe["Preço"]), ("RSI", detalhe["RSI"]), ("Score", detalhe["Score"]),
+        ("SMA9", detalhe["SMA9"]), ("SMA21", detalhe["SMA21"]), ("SMA50", detalhe["SMA50"]),
+    ]
+
+    for linha_inicio in (0, 3):
+        for col, (label, valor) in zip(st.columns(3), metricas_detalhe[linha_inicio:linha_inicio + 3]):
+            col.metric(label, valor)
+
+    st.metric("SMA200", detalhe["SMA200"])
+    st.success(detalhe["Sinal"])
+    st.info(detalhe["Motivos"])
+
+    # =====================================================
+    # GRÁFICO (reaproveita o df já calculado, sem baixar de novo)
+    # =====================================================
+
+    hist = dados.get(ativo)
 
     if hist is not None:
-
-        hist = add_indicators(hist)
-
-        graf = hist[
-            [
-                "close",
-                "SMA21",
-                "SMA50",
-                "SMA200"
-            ]
-        ]
-
         st.subheader("Histórico")
-
-        st.line_chart(graf)
+        st.line_chart(hist[["close", "SMA21", "SMA50", "SMA200"]])
