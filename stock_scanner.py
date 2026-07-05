@@ -202,7 +202,7 @@ def classificar(score):
         return "🟢 Compra Forte"
     if score >= 70:
         return "🟢 Compra"
-    if score >= 40:
+    if score >= 25:
         return "🟡 Neutro"
     return "🔴 Venda"
 
