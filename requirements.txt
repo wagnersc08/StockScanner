@@ -1,5 +1,3 @@
-fastapi
-uvicorn
+streamlit
 pandas
-requests
-twelvedata
+yfinance
