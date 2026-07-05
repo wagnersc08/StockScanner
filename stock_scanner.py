@@ -20,9 +20,9 @@ st.title("📈 Scanner de Ativos")
 
 DEFAULT = [
     "ABEV3.SA", "BBAS3.SA", "BBSE3.SA", "BOVA11.SA", "CMIG4.SA",
-    "CMIN3.SA", "DIVO11.SA", "ISAE4.SA", "ITUB4", "ITSA4","LAVV3.SA", "PETR4.SA",
+    "CMIN3.SA", "DIVO11.SA", "ISAE4.SA", "ITUB4.SA", "ITSA4.SA", "LAVV3.SA", "PETR4.SA",
     "POMO4.SA", "SAPR11.SA", "SMAL11.SA", "SMTO3.SA", "VALE3.SA",
-    "WEGE3","VOO", "SCHD", "SPDW", "QQQ", "TLT", "CIBR", "BRK-B",
+    "WEGE3.SA", "VOO", "SCHD", "SPDW", "QQQ", "TLT", "CIBR", "BRK-B",
     "JNJ", "CVX", "UBER", "NKE", "DLR"
 ]
 
@@ -105,35 +105,43 @@ def get(symbol):
 
 # =====================================================
 # REGRAS DE SCORE
-# Cada regra recebe a última linha do df e devolve (pontos, motivo)
-# ou None se não houver dado suficiente para avaliar.
+#
+# Score orientado a "barateza" (mean-reversion / contrarian), não a
+# tendência de alta. Cada regra recebe o df completo e devolve
+# (pontos, motivo) ou None se não houver dado suficiente para avaliar.
+#
+# Ordem de prioridade (do peso maior pro menor):
+#   1) Divergência de RSI     -> ±40
+#   2) RSI simples             -> ±30
+#   3) Desconto vs. SMA200     -> ±20
+#   4) Variações de médias     -> ±5 (curto e longo prazo)
 # =====================================================
 
 def regra_sma_curto(df):
     ultimo = df.iloc[-1]
     if pd.isna(ultimo.SMA9) or pd.isna(ultimo.SMA21):
         return None
-    if ultimo.SMA9 > ultimo.SMA21:
-        return 10, "SMA9 > SMA21 (curto prazo positivo)"
-    return -10, "SMA9 < SMA21 (curto prazo negativo)"
+    if ultimo.SMA9 < ultimo.SMA21:
+        return 5, "SMA9 < SMA21 (leve desconto de curto prazo)"
+    return -5, "SMA9 > SMA21 (sem desconto de curto prazo)"
 
 
 def regra_sma_longo(df):
     ultimo = df.iloc[-1]
     if pd.isna(ultimo.SMA50) or pd.isna(ultimo.SMA200):
         return None
-    if ultimo.SMA50 > ultimo.SMA200:
-        return 15, "SMA50 > SMA200 (tendência de fundo positiva)"
-    return -15, "SMA50 < SMA200 (tendência de fundo negativa)"
+    if ultimo.SMA50 < ultimo.SMA200:
+        return 5, "SMA50 < SMA200 (papel fora de favor, possível barganha)"
+    return -5, "SMA50 > SMA200 (sem desconto de médio prazo)"
 
 
 def regra_preco_sma200(df):
     ultimo = df.iloc[-1]
     if pd.isna(ultimo.close) or pd.isna(ultimo.SMA200):
         return None
-    if ultimo.close > ultimo.SMA200:
-        return 20, "Preço acima da SMA200"
-    return -20, "Preço abaixo da SMA200"
+    if ultimo.close < ultimo.SMA200:
+        return 20, "Preço abaixo da SMA200 (negociando com desconto)"
+    return -20, "Preço acima da SMA200 (sem desconto, mais caro)"
 
 
 def regra_rsi(df):
@@ -184,17 +192,19 @@ def regra_divergencia_rsi(df, ordem=5, lookback=90):
     if len(minimos) >= 2:
         i1, i2 = minimos[-2], minimos[-1]
         if precos[i2] < precos[i1] and rsis[i2] > rsis[i1]:
-            return 30, "Divergência de alta no RSI (preço caiu, RSI subiu)"
+            return 40, "Divergência de alta no RSI (preço caiu, RSI subiu)"
 
     if len(maximos) >= 2:
         i1, i2 = maximos[-2], maximos[-1]
         if precos[i2] > precos[i1] and rsis[i2] < rsis[i1]:
-            return -30, "Divergência de baixa no RSI (preço subiu, RSI caiu)"
+            return -40, "Divergência de baixa no RSI (preço subiu, RSI caiu)"
 
     return None
 
 
-REGRAS = [regra_sma_curto, regra_sma_longo, regra_preco_sma200, regra_rsi, regra_divergencia_rsi]
+# Ordem da lista não afeta o cálculo (todas as regras são somadas),
+# mas segue a mesma ordem de prioridade dos pesos para facilitar leitura.
+REGRAS = [regra_divergencia_rsi, regra_rsi, regra_preco_sma200, regra_sma_curto, regra_sma_longo]
 
 
 def classificar(score):
@@ -202,7 +212,7 @@ def classificar(score):
         return "🟢 Compra Forte"
     if score >= 70:
         return "🟢 Compra"
-    if score >= 25:
+    if score >= 30:
         return "🟡 Neutro"
     return "🔴 Venda"
 
@@ -302,7 +312,7 @@ if executar:
         ("Ativos", len(resultado)),
         ("Compra Forte", (resultado["Score"] >= 85).sum()),
         ("Compra", ((resultado["Score"] >= 70) & (resultado["Score"] < 85)).sum()),
-        ("Venda", (resultado["Score"] < 40).sum()),
+        ("Venda", (resultado["Score"] < 30).sum()),
     ]
 
     for col, (label, valor) in zip(st.columns(4), metricas_gerais):
